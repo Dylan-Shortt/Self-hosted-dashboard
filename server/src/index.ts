@@ -1,6 +1,7 @@
 import { buildApp } from './app.js';
-import { loadConfig } from './config.js';
+import { loadConfig, loadEnvFile } from './config.js';
 
+loadEnvFile();
 const config = loadConfig();
 const app = buildApp(config);
 
