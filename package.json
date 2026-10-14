@@ -1,0 +1,14 @@
+{
+  "name": "self-hosted-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Self-hosted developer dashboard: GitHub activity, CI runs, system stats, weather and tasks.",
+  "license": "MIT",
+  "workspaces": [
+    "web",
+    "server"
+  ],
+  "engines": {
+    "node": ">=20"
+  }
+}
