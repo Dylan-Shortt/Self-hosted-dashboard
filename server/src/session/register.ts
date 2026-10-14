@@ -13,11 +13,11 @@ export interface SessionUser {
 
 export interface GithubUserTokens {
   accessToken: string;
-  /** Epoch ms when the access token expires. */
-  accessTokenExpiresAt: number;
-  refreshToken: string;
+  /** Epoch ms when the access token expires. Absent if the App issues non-expiring tokens. */
+  accessTokenExpiresAt?: number | undefined;
+  refreshToken?: string | undefined;
   /** Epoch ms when the refresh token expires. */
-  refreshTokenExpiresAt: number;
+  refreshTokenExpiresAt?: number | undefined;
 }
 
 declare module 'fastify' {
