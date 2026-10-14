@@ -4,9 +4,14 @@ import type { GithubUserTokens, SessionUser } from '../session/register.js';
 
 export class GithubAuthError extends Error {}
 
+/** GitHub could not be reached at all. Transient, so callers should not end the session. */
+export class GithubUnreachableError extends GithubAuthError {}
+
 export interface GithubOAuthClient {
   buildAuthorizeUrl(state: string): string;
   exchangeCode(code: string): Promise<GithubUserTokens>;
+  /** Refresh tokens are single-use: a successful call invalidates the one passed in. */
+  refreshTokens(refreshToken: string): Promise<GithubUserTokens>;
   fetchUser(accessToken: string): Promise<SessionUser>;
 }
 
@@ -30,7 +35,11 @@ const userSchema = z.object({
  * The same response shape is used for the code exchange and for refreshing.
  */
 export function parseTokenResponse(raw: unknown, now = Date.now()): GithubUserTokens {
-  const body = tokenResponseSchema.parse(raw);
+  const parsed = tokenResponseSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new GithubUnreachableError('Unexpected token response from GitHub');
+  }
+  const body = parsed.data;
   if (body.error || !body.access_token) {
     throw new GithubAuthError(`GitHub rejected the token request: ${body.error ?? 'no token'}`);
   }
@@ -53,12 +62,29 @@ export function createGithubOAuthClient(
   const { clientId, clientSecret } = config.github;
   const redirectUri = `${config.appUrl}/api/auth/callback`;
 
-  /** Network failures (DNS, timeout, connection reset) become a GithubAuthError. */
+  /** Network failures (DNS, timeout, connection reset) become a GithubUnreachableError. */
   const send = async (url: string, init: RequestInit): Promise<Response> => {
     try {
       return await fetchImpl(url, { ...init, signal: AbortSignal.timeout(10_000) });
     } catch (err) {
-      throw new GithubAuthError(`Could not reach GitHub: ${(err as Error).message}`);
+      throw new GithubUnreachableError(`Could not reach GitHub: ${(err as Error).message}`);
+    }
+  };
+
+  /** A GitHub outage or rate limit is transient. Any other failure status is a rejection. */
+  const failedStatus = (what: string, res: Response): GithubAuthError => {
+    const message = `${what} failed: HTTP ${res.status}`;
+    return res.status >= 500 || res.status === 429
+      ? new GithubUnreachableError(message)
+      : new GithubAuthError(message);
+  };
+
+  /** A body that is not JSON (e.g. an HTML error page from a proxy) is treated as an outage. */
+  const readJson = async (res: Response): Promise<unknown> => {
+    try {
+      return await res.json();
+    } catch {
+      throw new GithubUnreachableError('GitHub returned a response that is not JSON');
     }
   };
 
@@ -84,8 +110,23 @@ export function createGithubOAuthClient(
           redirect_uri: redirectUri,
         }),
       });
-      if (!res.ok) throw new GithubAuthError(`Token exchange failed: HTTP ${res.status}`);
-      return parseTokenResponse(await res.json());
+      if (!res.ok) throw failedStatus('Token exchange', res);
+      return parseTokenResponse(await readJson(res));
+    },
+
+    async refreshTokens(refreshToken) {
+      const res = await send('https://github.com/login/oauth/access_token', {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          client_id: clientId,
+          client_secret: clientSecret,
+          grant_type: 'refresh_token',
+          refresh_token: refreshToken,
+        }),
+      });
+      if (!res.ok) throw failedStatus('Token refresh', res);
+      return parseTokenResponse(await readJson(res));
     },
 
     async fetchUser(accessToken) {
@@ -97,8 +138,10 @@ export function createGithubOAuthClient(
           'X-GitHub-Api-Version': '2022-11-28',
         },
       });
-      if (!res.ok) throw new GithubAuthError(`Fetching the user failed: HTTP ${res.status}`);
-      const user = userSchema.parse(await res.json());
+      if (!res.ok) throw failedStatus('Fetching the user', res);
+      const parsed = userSchema.safeParse(await readJson(res));
+      if (!parsed.success) throw new GithubUnreachableError('Unexpected user response from GitHub');
+      const user = parsed.data;
       return { id: user.id, login: user.login, avatarUrl: user.avatar_url };
     },
   };
